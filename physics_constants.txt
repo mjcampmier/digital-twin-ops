@@ -1,0 +1,11 @@
+gamma_RH      = 0.181397
+RH_dry        = 0.2
+trunc_ratio_ln= 0.501560
+b_obs_dry     = 19.542391   # Mm^-1
+b_true_dry    = 38.963205   # Mm^-1
+kappa         = 0.2
+
+# --- CHOSEN humidification surrogate for Julia (R^2=0.996 vs full Mie) ---
+# f(RH) = ( GF(RH) / GF(RH_dry) )^p_scat,  GF from kappa-Koehler (closed form)
+p_scat        = 1.2466
+GF_dry        = 1.016400   # growth_factor(RH_dry=0.20, kappa=0.20)
