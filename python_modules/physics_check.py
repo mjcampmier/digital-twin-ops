@@ -18,8 +18,11 @@ Nothing here depends on proprietary data; the aerosol is an *assumed* background
 accumulation mode. The whole point of the UDE is that the NN corrects for that
 assumption being wrong (composition, aging, hysteresis, flow).
 """
+import pathlib
 import numpy as np
 import miepython as mp
+
+_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 # ---------------------------------------------------------------- constants
 LAMBDA   = 0.657          # laser wavelength [um]  (Ouimette 2024)
@@ -155,13 +158,25 @@ def main():
     for r in (0.40, 0.60, 0.80, 0.90):
         print(f"    RH={r*100:4.0f}%:  f_mie={((1-RH_DRY)/(1-r))**gamma:5.2f}"
               f"   (full Mie: {bulk_scattering(r,True,'ln')/bulk_scattering(RH_DRY,True,'ln'):5.2f})")
-    print("  -> pass gamma into Julia; f(RH) there is one cheap differentiable line.")
+    print("  -> gamma-law is a useful reference but NOT what Julia uses.")
+
+    # --- 3b. kappa-Koehler surrogate (the form Julia actually uses) ----------
+    gf_dry_val = growth_factor(RH_DRY)
+    x_kk = np.log(np.array([growth_factor(r) for r in rh_grid]) / gf_dry_val)
+    p_scat = float(np.sum(x_kk * y) / np.sum(x_kk * x_kk))
+    f_kk = np.exp(p_scat * x_kk)
+    r2_kk = 1.0 - np.sum((f_obs - f_kk)**2) / ss_tot
+    print(f"\n-- kappa-Koehler surrogate  f(RH) = (GF(RH)/GF_dry)^p_scat --")
+    print(f"  p_scat = {p_scat:.4f},  R^2 = {r2_kk:.5f},  GF_dry = {gf_dry_val:.6f}")
+    for r in (0.40, 0.60, 0.80, 0.90):
+        gf_r = growth_factor(r)
+        print(f"    RH={r*100:4.0f}%:  f_kk={(gf_r/gf_dry_val)**p_scat:5.2f}"
+              f"   (full Mie: {bulk_scattering(r,True,'ln')/bulk_scattering(RH_DRY,True,'ln'):5.2f})")
+    print("  -> P_SCAT and GF_dry written to physics_constants.txt for Julia")
 
     # --- 4. PSE log-base sensitivity ----------------------------------------
     print("\n-- PSE log-base sensitivity (flag for Eq. 16 verification) --")
     for base in ("ln", "log10"):
-        for d in (0.3, 0.6, 1.0, 2.5):
-            pass
         print(f"    base={base:6s}: PSE(0.6um)={float(pse(0.6,base)):.3f}, "
               f"PSE(1.0um)={float(pse(1.0,base)):.3f}, "
               f"PSE(2.5um)={float(pse(2.5,base)):.3f}")
@@ -169,14 +184,21 @@ def main():
     print("     weakly changes f(RH) shape. Confirm base against the paper.")
 
     # save constants for the Julia port
-    with open("physics_constants.txt", "w") as fh:
+    out_path = _ROOT / "physics_constants.txt"
+    with open(out_path, "w") as fh:
         fh.write(f"gamma_RH      = {gamma:.6f}\n")
         fh.write(f"RH_dry        = {RH_DRY}\n")
         fh.write(f"trunc_ratio_ln= {b_obs_dry/b_true_dry:.6f}\n")
         fh.write(f"b_obs_dry     = {b_obs_dry:.6f}   # Mm^-1\n")
         fh.write(f"b_true_dry    = {b_true_dry:.6f}   # Mm^-1\n")
         fh.write(f"kappa         = {KAPPA}\n")
-    print("\nwrote physics_constants.txt  ->  gamma_RH = %.4f (used by Julia)" % gamma)
+        fh.write(f"\n# --- CHOSEN humidification surrogate for Julia (R^2={r2_kk:.3f} vs full Mie) ---\n")
+        fh.write(f"# f(RH) = ( GF(RH) / GF(RH_dry) )^p_scat,  GF from kappa-Koehler (closed form)\n")
+        fh.write(f"p_scat        = {p_scat:.6f}\n")
+        fh.write(f"GF_dry        = {gf_dry_val:.6f}   # growth_factor(RH_dry={RH_DRY}, kappa={KAPPA})\n")
+    print(f"\nwrote {out_path}")
+    print(f"  gamma_RH = {gamma:.4f}  (Kasten form, reference only)")
+    print(f"  p_scat   = {p_scat:.4f}  (kappa-Koehler form, used by Julia)")
 
     # figure
     try:
@@ -203,8 +225,8 @@ def main():
         ax[2].plot(rh_grid*100, f_fit, "-", lw=1.6, label=f"gamma-law (g={gamma:.2f})")
         ax[2].set_xlabel("RH [%]"); ax[2].set_ylabel("f(RH) = b(RH)/b(dry)")
         ax[2].set_title("humidification factor"); ax[2].legend(fontsize=8)
-        fig.tight_layout(); fig.savefig("physics_check.png", dpi=130)
-        print("wrote physics_check.png")
+        fig.tight_layout(); fig.savefig(_ROOT / "physics_check.png", dpi=130)
+        print(f"wrote {_ROOT / 'physics_check.png'}")
     except Exception as e:
         print("(figure skipped:", e, ")")
 
