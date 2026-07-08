@@ -48,7 +48,10 @@ NN, NN_p0 = SimpleNeuralNetwork(6, 1; hidden = 12)
            x[3] / WIND_SCALE,
            x[4],
            x[5] / DRH_SCALE]
-    return NN(inp, p.NN)[1] * CH1_SCALE
+    # tanh bounds the residual tendency to ±0.3·CH1_SCALE (≈±780 counts/day).
+    # True signals (aging ~260, hyst ~104, flow ~78) fit inside; the 2×C0 spurious
+    # fixed point that trapped derivative matching requires ~+2600 and is blocked.
+    return tanh(NN(inp, p.NN)[1]) * 0.3 * CH1_SCALE
 end
 
 # -----------------------------------------------------------------------------
@@ -73,7 +76,7 @@ model = CustomDerivatives(data, X, dudt, init_parameters;
                           time_column_name = "time",
                           proc_weight      = 2.0,
                           obs_weight       = 1.0,
-                          reg_weight       = 1e-4,
+                          reg_weight       = 1e-2,
                           reg_type         = "L2")
 
 # Stage 1: derivative matching (fast; splines the data and matches du/dt).
@@ -86,12 +89,15 @@ train!(model;
        verbose       = true,
        optim_options = (maxiter = 2500,))
 
-# Stage 2: BFGS refinement (optional but consistently improves final loss).
+# Stage 2: UKF conditional-likelihood refinement.
+# Marginalises over the latent state trajectory; avoids the derivative-matching
+# local minima that arise when noise+confounding let the NN absorb constant offsets.
 train!(model;
-       loss_function = "derivative matching",
-       optimizer     = "BFGS",
+       loss_function = "conditional likelihood",
+       loss_options  = (observation_error = 0.05, process_error = 0.02),
+       optimizer     = "ADAM",
        verbose       = true,
-       optim_options = (maxiter = 400,))
+       optim_options = (maxiter = 2500,))
 
 # -----------------------------------------------------------------------------
 # 5.  VALIDATION — does the NN recover the injected effects without being told?
