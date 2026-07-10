@@ -22,22 +22,22 @@ using UniversalDiffEq, DataFrames, Lux, ComponentArrays, Random, Statistics, Pri
 Random.seed!(20260707)
 
 const PP         = PhysicsParams()
-const CH1_SCALE  = 2600.0
 const T_SCALE    = 30.0
 const WIND_SCALE = 5.0
 const DRH_SCALE  = 0.10
+const X_DRY_LOC  = Float64[20.0 / T_SCALE, 0.0, 0.0, 0.0]  # [T_norm, wind_norm, t_deploy, dRHdt_norm]
 
 data, X, truth = synthetic_deployment(PP)
 
 function train_width(hidden::Int)
-    NN_loc, NN_p0_loc = SimpleNeuralNetwork(6, 1; hidden = hidden)
+    NN_loc, NN_p0_loc = SimpleNeuralNetwork(4, 1; hidden = hidden)
 
-    @inline function res_loc(u, x, p)
-        inp = [u[1]/CH1_SCALE, x[1], x[2]/T_SCALE, x[3]/WIND_SCALE, x[4], x[5]/DRH_SCALE]
-        return NN_loc(inp, p.NN)[1] * CH1_SCALE
+    @inline function g_loc(x, p)
+        inp = [x[2]/T_SCALE, x[3]/WIND_SCALE, x[4], x[5]/DRH_SCALE]
+        return NN_loc(inp, p.NN)[1] - NN_loc(X_DRY_LOC, p.NN)[1]
     end
 
-    dudt_loc = make_dudt(PP, res_loc)
+    dudt_loc = make_dudt(PP, g_loc)
     init_p   = (NN = NN_p0_loc, log_k = 1.0, C0 = 2600.0)
 
     m = CustomDerivatives(data, X, dudt_loc, init_p;
@@ -50,16 +50,17 @@ function train_width(hidden::Int)
     train!(m; loss_function = "derivative matching",
            optimizer = "ADAM", verbose = false,
            optim_options = (maxiter = 2000,))
-    train!(m; loss_function = "derivative matching",
-           optimizer = "BFGS", verbose = false,
-           optim_options = (maxiter = 300,))
+    train!(m; loss_function = "conditional likelihood",
+           loss_options  = (observation_error = 0.05, process_error = 0.02),
+           optimizer = "ADAM", verbose = false,
+           optim_options = (maxiter = 1000,))
     return m
 end
 
 widths = [6, 8, 12, 16, 24]
 
 println("=" ^ 72)
-println("SENSITIVITY: NN hidden layer width  (6 inputs → hidden → 1 output)")
+println("SENSITIVITY: NN hidden layer width  (4 inputs → hidden → 1 output)")
 println("=" ^ 72)
 println("Training $(length(widths)) models — this will take several minutes.\n")
 
@@ -73,44 +74,34 @@ for w in widths
     flush(stdout)
 end
 
-println("\n-- recovered aging at t_deploy=1 yr  (injected: exp(-0.105) = $(round(exp(-0.105), digits=3))) --")
-println("  width   u*(t=1yr)/C0")
+# Fixed point is exact in one step because g is u-independent:
+# u* = C0·f(RH)·(1+g(x)).  Evaluate g from the stored RHS:
+# RHS(u0) = k·(C0·f·(1+g) − u0)  at u0 = C0·f  →  RHS(u0) = k·C0·f·g
+# ∴  u* = u0 + RHS(u0)/k  exactly.
+function fp_exact(m, x_vec)
+    p   = get_parameters(m)
+    C0l = abs(p.C0)
+    f   = f_RH(Float64(x_vec[1]), PP)
+    u0  = C0l * f
+    rhs = get_right_hand_side(m)
+    kl  = max(abs(p.log_k), 1.0) + 1e-3
+    return u0 + rhs([u0], x_vec, 0.0)[1] / kl
+end
+
+println("\n-- no-spurious-aging check: u*(t=1yr)/u*(t=0)  (injected: 1.000, limit ±5%) --")
+println("  width   ratio   dev")
 for w in widths
-    m    = results[w]
-    pars = get_parameters(m)
-    C0h  = abs(pars.C0)
-    RHS  = get_right_hand_side(m)
-    xa   = [PP.rh_dry, 20.0, 0.0, 1.0, 0.0]
-    g(u1) = RHS([u1], xa, 0.0)[1]
-    lo, hi = 0.3 * C0h, 2.0 * C0h
-    glo = g(lo)
-    for _ in 1:60
-        mid = 0.5*(lo+hi); gm = g(mid)
-        (sign(gm)==sign(glo)) ? (lo=mid; glo=gm) : (hi=mid)
-    end
-    fp = 0.5*(lo+hi)
-    @printf "  %5d   %6.3f\n" w fp / C0h
+    base_u = fp_exact(results[w], [PP.rh_dry, 20.0, 0.0, 0.0, 0.0])
+    yr1_u  = fp_exact(results[w], [PP.rh_dry, 20.0, 0.0, 1.0, 0.0])
+    ratio  = yr1_u / base_u
+    @printf "  %5d   %6.3f   %+5.1f%%\n" w ratio (ratio - 1.0) * 100
 end
 
 println("\n-- recovered f(RH=0.80)/f(RH=0.20)  (physics: $(round(f_RH(0.80,PP), digits=3))) --")
 println("  width   recovered")
 for w in widths
-    m    = results[w]
-    pars = get_parameters(m)
-    C0h  = abs(pars.C0)
-    RHS  = get_right_hand_side(m)
-    function fp_at(x_vec)
-        lo, hi = 0.3*C0h, 2.0*C0h
-        g(u1) = RHS([u1], x_vec, 0.0)[1]
-        glo = g(lo)
-        for _ in 1:60
-            mid=0.5*(lo+hi); gm=g(mid)
-            (sign(gm)==sign(glo)) ? (lo=mid; glo=gm) : (hi=mid)
-        end
-        return 0.5*(lo+hi)
-    end
-    base_u = fp_at([PP.rh_dry, 20.0, 0.0, 0.0, 0.0])
-    rh80_u = fp_at([0.80, 20.0, 0.0, 0.0, 0.0])
+    base_u = fp_exact(results[w], [PP.rh_dry, 20.0, 0.0, 0.0, 0.0])
+    rh80_u = fp_exact(results[w], [0.80, 20.0, 0.0, 0.0, 0.0])
     @printf "  %5d   %6.3f\n" w rh80_u / base_u
 end
 
