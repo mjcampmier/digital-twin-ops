@@ -95,16 +95,35 @@ Covariate layout in x (set by the column order of the X DataFrame):
     x[5] = dRHdt       (RH/day)
 """
 function make_dudt(pp::PhysicsParams, g_fn)
-    # NOTE: gf_dry cannot be pre-computed because kappa_eff is a fitted parameter
-    # that changes during training.  Both GF calls are inside the hot path so AD
-    # (ForwardDiff / Zygote) sees the full dependency on p.kappa_eff.
+    # gf_dry cannot be pre-computed: kappa_eff is a fitted parameter, so AD
+    # (ForwardDiff / Zygote) must see both GF calls inside the hot path.
     function dudt(u, x, p, t)
         k       = max(abs(p.log_k), 1.0) + 1e-3
         C0      = abs(p.C0)
-        kappa_e = abs(p.kappa_eff) + 1e-3        # positivity floor
+        kappa_e = abs(p.kappa_eff) + 1e-3
         gf      = growth_factor(Float64(x[1]), kappa_e)
         gf_dry  = growth_factor(pp.rh_dry, kappa_e)
         f_rh    = (gf / gf_dry)^pp.p_scat
+        return [k * (C0 * f_rh * (1.0 + g_fn(x, p)) - u[1])]
+    end
+    return dudt
+end
+
+"""
+Stage-1 ODE RHS with kappa_eff locked to a constant.
+
+kappa_eff is still present in p (so the parameter vector has the right shape),
+but the ODE uses kappa_lock directly — gradient w.r.t. p.kappa_eff is zero and
+ADAM leaves it unchanged.  After stage-1 convergence, rebuild with make_dudt to
+release kappa_eff for stage-2 fine-tuning.
+"""
+function make_dudt_locked(pp::PhysicsParams, g_fn, kappa_lock::Float64)
+    gf_dry_locked = growth_factor(pp.rh_dry, kappa_lock)   # constant, safe to pre-compute
+    function dudt(u, x, p, t)
+        k    = max(abs(p.log_k), 1.0) + 1e-3
+        C0   = abs(p.C0)
+        gf   = growth_factor(Float64(x[1]), kappa_lock)
+        f_rh = (gf / gf_dry_locked)^pp.p_scat
         return [k * (C0 * f_rh * (1.0 + g_fn(x, p)) - u[1])]
     end
     return dudt
